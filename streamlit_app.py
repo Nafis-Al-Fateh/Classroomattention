@@ -1,46 +1,42 @@
 import streamlit as st
-import torch
 import cv2
 import tempfile
-from ultralytics import YOLO
 import numpy as np
+from ultralytics import YOLO
 
 # -------------------------------
 # Load YOLOv9s model
 # -------------------------------
 @st.cache_resource
 def load_model():
+    # Ensure yolov9s.pt is in the same folder or give full path
     model = YOLO("yolov9s.pt")
     return model
 
 model = load_model()
 
 # -------------------------------
-# Simple attentiveness heuristic
+# Simple attention classifier (rule-based)
 # -------------------------------
-def classify_attention(face_box):
+def classify_attention(box):
     """
-    Basic rule-based attention classifier.
-    face_box = [x1, y1, x2, y2]
+    Rule-based attention classification based on bounding box aspect ratio.
     """
-
-    x1, y1, x2, y2 = face_box
+    x1, y1, x2, y2 = box
     w = x2 - x1
     h = y2 - y1
 
-    # Ratio of width to height gives pose clues
-    ratio = w / h
+    ratio = w / h if h != 0 else 1
 
     if ratio < 0.75:
         return "Looking Down"
-    elif 0.75 <= ratio <= 1.20:
+    elif 0.75 <= ratio <= 1.2:
         return "Attentive"
     else:
         return "Distracted"
 
-
 # -------------------------------
-# Draw bounding boxes
+# Draw bounding box & label
 # -------------------------------
 def draw_result(frame, box, label):
     x1, y1, x2, y2 = map(int, box)
@@ -50,11 +46,17 @@ def draw_result(frame, box, label):
                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
     return frame
 
-
 # -------------------------------
-# Process a frame
+# Process a single frame
 # -------------------------------
 def process_frame(frame, model):
+    # Ensure frame is uint8 and contiguous for YOLO
+    frame = np.ascontiguousarray(frame, dtype=np.uint8)
+    if len(frame.shape) == 2:
+        frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+    elif frame.shape[2] == 4:
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+
     results = model(frame, verbose=False)
 
     for r in results:
@@ -62,71 +64,57 @@ def process_frame(frame, model):
         classes = r.boxes.cls.cpu().numpy()
 
         for box, cls in zip(boxes, classes):
-            if int(cls) == 0:  # class 0 = person
+            if int(cls) == 0:  # person class
                 attention = classify_attention(box)
                 frame = draw_result(frame, box, attention)
-
     return frame
 
-
 # -------------------------------
-# MAIN STREAMLIT UI
+# Streamlit UI
 # -------------------------------
 st.title("🎓 Student Attentiveness Detection - YOLOv9s")
-st.write("Real-time or uploaded video stream analysis using YOLOv9s")
+st.write("Upload a classroom video or use webcam for real-time analysis.")
 
-option = st.radio("Choose Input Source:",
-                  ["Upload Video", "Webcam"],
-                  horizontal=True)
+option = st.radio("Input Source:", ["Upload Video", "Webcam"], horizontal=True)
 
-# -------------------------------
-# Upload Video Mode
-# -------------------------------
 if option == "Upload Video":
-    uploaded_file = st.file_uploader("Upload a classroom video", type=["mp4", "mov", "avi"])
+    uploaded_file = st.file_uploader("Upload video", type=["mp4", "avi", "mov"])
 
-    if uploaded_file:
-        temp_file = tempfile.NamedTemporaryFile(delete=False)
-        temp_file.write(uploaded_file.read())
-        video_path = temp_file.name
+    if uploaded_file is not None:
+        tfile = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+        tfile.write(uploaded_file.read())
+        tfile.flush()
+        video_path = tfile.name
 
         stframe = st.empty()
-
         cap = cv2.VideoCapture(video_path)
 
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret:
                 break
-
             frame = cv2.resize(frame, (720, 480))
             frame = process_frame(frame, model)
             stframe.image(frame, channels="BGR")
 
         cap.release()
 
-# -------------------------------
-# Webcam Mode
-# -------------------------------
 elif option == "Webcam":
-    st.write("Allow webcam access to begin.")
-
+    st.write("Allow webcam access and click 'Start Webcam'.")
     run = st.checkbox("Start Webcam")
 
     if run:
         stframe = st.empty()
         cap = cv2.VideoCapture(0)
-
-        while run:
-            ret, frame = cap.read()
-            if not ret:
-                st.error("Failed to access webcam.")
-                break
-
-            frame = cv2.resize(frame, (720, 480))
-            frame = process_frame(frame, model)
-
-            stframe.image(frame, channels="BGR")
-            run = st.checkbox("Start Webcam", value=True)
-
-        cap.release()
+        if not cap.isOpened():
+            st.error("Cannot open webcam.")
+        else:
+            while run:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                frame = cv2.resize(frame, (720, 480))
+                frame = process_frame(frame, model)
+                stframe.image(frame, channels="BGR")
+                run = st.checkbox("Start Webcam", value=True)
+            cap.release()
